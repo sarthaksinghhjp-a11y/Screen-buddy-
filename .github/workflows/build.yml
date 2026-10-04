@@ -1,3 +1,171 @@
+name: Build APK
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Create project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name="ScreenBuddy"; include(":app")
+          EOF_FILE
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF_FILE
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF_FILE
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace="com.example.screenbuddy"
+              compileSdk=35
+              defaultConfig {
+                  applicationId="com.example.screenbuddy"
+                  minSdk=26
+                  targetSdk=35
+                  versionCode=2
+                  versionName="0.2"
+              }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.activity:activity-ktx:1.10.0")
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+              <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
+              <application android:theme="@style/AppTheme" android:label="Screen Buddy" android:allowBackup="true">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".BuddyService" android:exported="false" android:foregroundServiceType="specialUse">
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="floating screen buddy overlay"/>
+                  </service>
+                  <receiver android:name=".BootReceiver" android:exported="false">
+                      <intent-filter><action android:name="android.intent.action.BOOT_COMPLETED"/></intent-filter>
+                  </receiver>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/res/values/styles.xml)
+          cat > app/src/main/res/values/styles.xml <<'EOF_FILE'
+          <resources>
+          <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+              <item name="android:fontFamily">sans</item>
+              <item name="android:colorAccent">#7C6AE6</item>
+          </style>
+          </resources>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/screenbuddy/BootReceiver.kt)
+          cat > app/src/main/java/com/example/screenbuddy/BootReceiver.kt <<'EOF_FILE'
+          package com.example.screenbuddy
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.provider.Settings
+          import androidx.core.content.ContextCompat
+          class BootReceiver:BroadcastReceiver(){
+              override fun onReceive(c:Context,i:Intent){
+                  if(i.action==Intent.ACTION_BOOT_COMPLETED && Settings.canDrawOverlays(c))
+                      ContextCompat.startForegroundService(c,Intent(c,BuddyService::class.java))
+              }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/screenbuddy/BuddyService.kt)
+          cat > app/src/main/java/com/example/screenbuddy/BuddyService.kt <<'EOF_FILE'
+          package com.example.screenbuddy
+
+          import android.app.*
+          import android.content.Intent
+          import android.graphics.*
+          import android.os.*
+          import android.provider.Settings
+          import android.view.*
+          import android.widget.FrameLayout
+          import androidx.core.app.NotificationCompat
+          import kotlin.random.Random
+
+          class BuddyService: Service() {
+              private lateinit var wm: WindowManager
+              private lateinit var buddy: BuddyView
+              private val h=Handler(Looper.getMainLooper())
+              private var x=30
+              private var dir=1
+              private var action=0
+              private var actionUntil=0L
+
+              private val loop=object:Runnable{
+                  override fun run(){
+                      if(!::buddy.isInitialized) return
+                      val now=System.currentTimeMillis()
+                      if(now>=actionUntil){
+                          action=Random.nextInt(0,5)
+                          actionUntil=now+Random.nextLong(2500,6500)
+                          buddy.action=action
+                      }
+                      if(action==0 || action==4) {
+                          x += dir*3
+                          val max=(resources.displayMetrics.widthPixels-buddy.width).coerceAtLeast(0)
+                          if(x<=0){x=0;dir=1}; if(x>=max){x=max;dir=-1}
+                          buddy.direction=dir
+                      }
+                      val p=buddy.layoutParams as WindowManager.LayoutParams
+                      p.x=x
+                      wm.updateViewLayout(buddy,p)
+                      buddy.invalidate()
+                      h.postDelayed(this,32)
+                  }
+              }
+
+              override fun onCreate(){
+                  super.onCreate()
+                  val ch=NotificationChannel("buddy","Screen Buddy",NotificationManager.IMPORTANCE_LOW)
+                  getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+                  startForeground(42,NotificationCompat.Builder(this,"buddy")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentTitle("Screen Buddy is running")
+                      .setContentText("Your buddy is active.")
+                      .setOngoing(true).build())
+                  if(!Settings.canDrawOverlays(this)) return
+                  wm=getSystemService(WINDOW_SERVICE) as WindowManager
+                  buddy=BuddyView(this)
+                  val type=if(Build.VERSION.SDK_INT>=26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE
+                  val p=WindowManager.LayoutParams(280,390,type,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT).apply { gravity=Gravity.TOP or Gravity.START; x=30; y=300 }
                   wm.addView(buddy,p)
                   buddy.translationY=750f
                   buddy.animate().translationY(0f).setDuration(900).withEndAction{h.post(loop)}.start()
@@ -66,12 +234,12 @@
                   val title=TextView(this).apply { text="Screen Buddy v0.2"; textSize=28f; setPadding(32,32,32,16) }
                   val info=TextView(this).apply {
                       text="""Wardrobe:
-          â˜€ Normal â€” T-shirt + short skirt + socks + sneakers + shoulder bag
-          ðŸŽ® Gaming â€” cute maid dress + chibi mode
-          ðŸŒ™ Sleep â€” dark-blue pajamas
+          ☀ Normal — T-shirt + short skirt + socks + sneakers + shoulder bag
+          🎮 Gaming — cute maid dress + chibi mode
+          🌙 Sleep — dark-blue pajamas
 
           Behavior framework:
-          Walking â€¢ waving â€¢ sitting â€¢ turning â€¢ sleeping â€¢ waking
+          Walking • waving • sitting • turning • sleeping • waking
           9 PM sleep / 7 AM wake
           """.trimIndent()
                       textSize=16f; setPadding(32,8,32,24)
